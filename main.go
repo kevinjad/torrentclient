@@ -50,6 +50,48 @@ type Peer struct {
 	Port uint16
 }
 
+type Handshake struct {
+	Pstr     string
+	InfoHash [20]byte
+	PeerID   [20]byte
+}
+
+func (h *Handshake) Serialize() []byte {
+	buf := make([]byte, len(h.Pstr)+49)
+	buf[0] = byte(len(h.Pstr))
+	i := 1
+	i += copy(buf[i:], h.Pstr)
+	i += copy(buf[i:], make([]byte, 8))
+	i += copy(buf[i:], h.InfoHash[:])
+	i += copy(buf[i:], h.PeerID[:])
+	return buf
+}
+
+// Read parses a handshake from a stream
+func Read(r io.Reader) (*Handshake, error) {
+	b := make([]byte, 1)
+	_, err := io.ReadFull(r, b)
+	if err != nil {
+		return nil, err
+	}
+
+	pstrLen := int(b[0])
+	if pstrLen == 0 {
+		return nil, fmt.Errorf("Handshake recieved pstrLen should not be 0")
+	}
+	b = make([]byte, 48+pstrLen)
+	io.ReadFull(r, b)
+	var infoHash, peerId [20]byte
+	copy(infoHash[:], b[pstrLen+8:pstrLen+8+20])
+	copy(peerId[:], b[pstrLen+8+20:])
+	h := Handshake{
+		Pstr:     string(b[0:pstrLen]),
+		InfoHash: infoHash,
+		PeerID:   peerId,
+	}
+	return &h, nil
+}
+
 func UnmarshalPeerBin(peersBin []byte) ([]Peer, error) {
 	numBytesPeer := 6
 	if len(peersBin)%numBytesPeer != 0 {
@@ -159,6 +201,21 @@ func (t *TorrentInfo) getPeers(peerId [20]byte, port uint16) ([]Peer, error) {
 
 }
 
+func (p Peer) String() string {
+	return net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
+}
+
+func (p *Peer) makeConn() (net.Conn, error) {
+	// start a tcp connection
+	conn, err := net.Dial("tcp", p.String())
+	if err != nil {
+		fmt.Printf("err in making con %s\n", err)
+		return nil, err
+	}
+	fmt.Printf("Connected to peer %+v\n", conn)
+	return conn, nil
+}
+
 func main() {
 	torrentFileName := "/home/kevin/debian.torrent"
 	torrentFile, err := os.Open(torrentFileName)
@@ -186,5 +243,39 @@ func main() {
 	}
 
 	peers, _ := torrentInfo.getPeers(peerId, Port)
-	fmt.Printf("peers: %+v", peers)
+	for i := 0; i < len(peers); i++ {
+		go func(i int) {
+			peer := peers[i]
+			conn, err := peer.makeConn()
+			if err != nil {
+				fmt.Printf("peer connection failed for %d with err %s\n", i, err)
+				return
+			}
+			h := Handshake{
+				Pstr:     "BitTorrent protocol",
+				InfoHash: torrentInfo.InfoHash,
+				PeerID:   peerId,
+			}
+			fmt.Printf("Going to send handshake: %+v\n", h)
+			handshakeBytes := h.Serialize()
+			_, err = conn.Write(handshakeBytes)
+			if err != nil {
+				fmt.Printf("send handshake failed for %d with err %s\n", i, err)
+				return
+			}
+			recievedHandshake, err := Read(conn)
+			if err != nil {
+				fmt.Printf("peer handshake failed for %d with err %s\n", i, err)
+				return
+			}
+			fmt.Printf("rec handshake for %d is %+v", i, recievedHandshake)
+		}(i)
+
+		// conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		// conn.SetDeadline(time.Time{})
+	}
+	fmt.Printf("peers: %+v\n", peers)
+	time.Sleep(5 * time.Minute)
+
 }
